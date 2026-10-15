@@ -1,0 +1,125 @@
+# Scheduled Ingestion — Georgia Foreclosure Platform
+# Primary scheduler: GitHub Actions cron.
+# Calls POST /ingestion/run per source on the DEPLOYED FastAPI backend.
+#
+# REQUIRES a deployed FastAPI backend. This workflow does NOT run ingestion
+# itself — it triggers the backend, which owns ingestion + DB writes.
+# If the backend is not deployed yet, these runs will fail with a connection
+# error — that is expected. Do not "fix" it by adding scraping to this workflow.
+#
+# Required GitHub secrets (Settings → Secrets → Actions):
+#   FASTAPI_BASE_URL   — e.g. https://api.example.com (no trailing slash)
+#   INGESTION_SECRET   — must match the backend's INGESTION_SECRET env var
+#
+# Fallback scheduler: Supabase pg_cron + secured Edge Function proxying to
+# POST /ingestion/run. Only use if GitHub Actions scheduling is unavailable;
+# document which scheduler is active in docs/RUNBOOK.md.
+#
+# Schedule: daily 06:00 ET (America/New_York). GitHub cron uses UTC:
+#   ET is UTC-5 (EST, Nov–Mar) / UTC-4 (EDT, Mar–Nov).
+#   06:00 ET = 11:00 UTC in EST, 10:00 UTC in EDT.
+# We run at 10:30 UTC daily as a compromise (≈06:30 EDT / 05:30 EST).
+# Legal-organ sources need daily runs during the 4-week publication window;
+# daily cadence covers that. First-Tuesday-cycle sources are also triggered
+# daily — the backend's incremental logic skips when there is nothing new
+# (dedupe: re-run inserts 0 rows).
+
+name: Scheduled Ingestion
+
+on:
+  schedule:
+    - cron: "30 10 * * *"  # Daily ~06:30 ET (see note above)
+  workflow_dispatch:
+    inputs:
+      source_key:
+        description: "Run one source only (leave empty for all enabled sources)"
+        required: false
+        default: ""
+        type: string
+      mode:
+        description: "Ingestion mode"
+        required: false
+        default: "incremental"
+        type: choice
+        options: [incremental, full]
+      since:
+        description: "Backfill start date (YYYY-MM-DD) — only with mode=full"
+        required: false
+        default: ""
+        type: string
+      until:
+        description: "Backfill end date (YYYY-MM-DD) — only with mode=full"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  trigger-ingestion:
+    name: Trigger ingestion per source
+    runs-on: ubuntu-latest
+    # Sources in launch order. Pending-license sources (mls_pending,
+    # auction_proprietary, gsccca_bulk) are NOT listed — they are disabled
+    # and must produce zero rows until licensed.
+    strategy:
+      fail-fast: false  # One source failing must not block others.
+      matrix:
+        source_key:
+          - forsyth_legal_organ
+          - fulton_legal_organ
+          - forsyth_qpublic
+          - fulton_assessor
+          - gsccca_forsyth
+          - gsccca_fulton
+          - forsyth_auction
+          - fulton_auction
+          - hud_reo
+    steps:
+      - name: Skip if a single source was requested and this is not it
+        if: ${{ inputs.source_key != '' && inputs.source_key != matrix.source_key }}
+        run: echo "Skipping ${{ matrix.source_key }} (single-source dispatch for ${{ inputs.source_key }})."
+
+      - name: Trigger ingestion run
+        if: ${{ inputs.source_key == '' || inputs.source_key == matrix.source_key }}
+        env:
+          FASTAPI_BASE_URL: ${{ secrets.FASTAPI_BASE_URL }}
+          INGESTION_SECRET: ${{ secrets.INGESTION_SECRET }}
+          SOURCE_KEY: ${{ matrix.source_key }}
+          MODE: ${{ inputs.mode || 'incremental' }}
+          SINCE: ${{ inputs.since || '' }}
+          UNTIL: ${{ inputs.until || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$FASTAPI_BASE_URL" ]; then
+            echo "ERROR: FASTAPI_BASE_URL secret is not set. Deploy FastAPI first (see docs/RUNBOOK.md)."
+            exit 1
+          fi
+          if [ -z "$INGESTION_SECRET" ]; then
+            echo "ERROR: INGESTION_SECRET secret is not set."
+            exit 1
+          fi
+          # Build query string. Backfill params only with mode=full.
+          QS="source_key=${SOURCE_KEY}&mode=${MODE}"
+          if [ "$MODE" = "full" ]; then
+            [ -n "$SINCE" ] && QS="${QS}&since=${SINCE}"
+            [ -n "$UNTIL" ] && QS="${QS}&until=${UNTIL}"
+          fi
+          echo "Triggering ingestion: ${SOURCE_KEY} (mode=${MODE})"
+          HTTP_CODE=$(curl -sS -o /tmp/ingest_response.json -w "%{http_code}" \
+            -X POST "${FASTAPI_BASE_URL}/ingestion/run?${QS}" \
+            -H "X-Ingestion-Secret: ${INGESTION_SECRET}" \
+            -H "Content-Type: application/json" \
+            --max-time 120)
+          echo "HTTP ${HTTP_CODE}"
+          cat /tmp/ingest_response.json
+          echo ""
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Ingestion triggered for ${SOURCE_KEY}."
+          else
+            echo "ERROR: ingestion trigger failed for ${SOURCE_KEY} (HTTP ${HTTP_CODE})."
+            echo "The backend records the failure in ingestion_runs + source_health."
+            echo "Check docs/RUNBOOK.md 'When a source fails'."
+            exit 1
+          fi
