@@ -1,0 +1,50 @@
+# Secrets / env — NEVER commit real keys
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+.npm/
+.pnpm-store/
+*.tsbuildinfo
+
+# Python / FastAPI
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage/
+htmlcov/
+.coverage
+
+# Supabase local
+supabase/.branches/
+supabase/.temp/
+.branches/
+.temp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# Logs / temp
+*.log
+*.tmp
+/tmp/
