@@ -1,0 +1,73 @@
+# docker-compose.yml — Local development only.
+# Services:
+#   db       — Postgres 15 + PostGIS (postgis/postgis:15-3.4), port 54322
+#   backend  — FastAPI (./backend) — PLACEHOLDER until backend/ lands (separate agent).
+#   frontend — Next.js (./frontend) — PLACEHOLDER until frontend/ lands (separate agent).
+#
+# Usage:
+#   cp .env.example .env.local   # fill values; compose reads ${VAR} from environment
+#   docker compose up -d db      # DB only (recommended while backend/frontend are pending)
+#   docker compose up --build    # all services (once backend/ + frontend/ exist)
+#   docker compose down
+#
+# NOTE: This compose file is for LOCAL dev. Production uses the SUPPLIED
+# Supabase project, NOT this container. Never point production at this DB.
+# Never put real secrets in this file — all secrets come from environment.
+
+services:
+  db:
+    image: postgis/postgis:15-3.4
+    container_name: foreclosure-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-foreclosure}
+    ports:
+      - "${POSTGRES_PORT:-54322}:5432"
+    volumes:
+      - foreclosure_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: foreclosure-backend
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL:-}
+      INGESTION_SECRET: ${INGESTION_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Backend service will fail to build until ./backend/Dockerfile exists (separate agent).
+    # Use `docker compose up -d db` until then.
+    profiles: ["full"]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: foreclosure-frontend
+    environment:
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
+      NEXT_PUBLIC_FASTAPI_BASE_URL: ${NEXT_PUBLIC_FASTAPI_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+    # Frontend service will fail to build until ./frontend/Dockerfile exists (separate agent).
+    profiles: ["full"]
+
+volumes:
+  foreclosure_pgdata:
