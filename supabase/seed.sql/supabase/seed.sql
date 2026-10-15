@@ -1,0 +1,22 @@
+-- supabase/seed.sql — POINTER, not a second seed.
+-- The real seed is migration 0007_seed.sql (counties + sources registry ONLY).
+-- This file exists because `supabase seed` / `supabase db seed` expects a
+-- seed.sql at this path. It deliberately does NOT insert fake properties,
+-- notices, auctions, or comps.
+--
+-- To seed a fresh local DB:
+--   supabase db reset   # applies migrations incl. 0007_seed.sql
+-- Or, if you run migrations manually:
+--   psql "$SUPABASE_DB_URL" -f supabase/migrations/0007_seed.sql
+--
+-- Verify after seeding:
+--   select count(*) from counties;            -- expect 2
+--   select count(*) from sources;             -- expect 12
+--   select count(*) from properties;          -- expect 0
+--   select count(*) from foreclosure_notices; -- expect 0
+--   select count(*) from auction_events;      -- expect 0
+--   select count(*) from comparable_sales;    -- expect 0
+--
+-- NOTE: 0007_seed.sql is idempotent (ON CONFLICT DO NOTHING / DO UPDATE),
+-- so running it twice is safe. Do NOT add fake data here.
+\echo 'Seed lives in migrations/0007_seed.sql — no-op pointer file. See comments above.'
