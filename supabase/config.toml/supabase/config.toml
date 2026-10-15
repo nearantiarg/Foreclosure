@@ -1,0 +1,37 @@
+# Supabase local dev config — minimal.
+# Docs: https://supabase.com/docs/guides/local-development/cli/config
+# This repo uses the SUPPLIED Supabase project for production/staging.
+# Local config is for `supabase start` / `supabase db push` dry-runs only.
+# NEVER put real keys in this file. Use .env / .env.local (gitignored).
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+# PostGIS is enabled via migration 0001_extensions.sql, not here.
+
+[db.pooler]
+enabled = false
+
+[auth]
+enabled = true
+port = 9999
+# Email confirmation: disabled locally for dev convenience; enabled in cloud project.
+enable_signup = true
+
+[storage]
+enabled = true
+# Raw payloads for large PDFs may use Storage; see raw_payloads.storage_path.
+
+[studio]
+enabled = true
+port = 54323
+
+# Migrations live in ./migrations/. Seed lives in ./migrations/0007_seed.sql
+# (plus ./seed.sql which is a pointer — see that file).
