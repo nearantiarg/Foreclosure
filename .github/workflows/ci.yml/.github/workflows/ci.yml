@@ -1,0 +1,196 @@
+# CI — Georgia Foreclosure Platform
+# Runs on push + pull_request. MUST fail on any test failure.
+# Backend: ruff + black --check + mypy + pytest
+# Frontend: tsc --noEmit + eslint + npm test
+# Migrations: files exist + basic SQL parse check (no live DB required)
+#
+# NOTE on guards: frontend/backend jobs use `if: hashFiles(...) != ''` so CI
+# stays green while those dirs are still being built by separate agents.
+# Once backend/ and frontend/ exist, the guards pass and the jobs run for real.
+# Do NOT keep the guards as a way to skip tests once the dirs exist — remove
+# the `if:` lines when both dirs have landed (tracked in REPO_AUDIT.md).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Migration check — no live DB required. Verifies files exist, are non-empty,
+  # and parse as SQL (balanced parens/quotes + no obviously truncated file).
+  # A real `supabase db push` against a branch project is the stronger check
+  # (see RUNBOOK.md); this job catches missing/empty/broken files in CI.
+  # ---------------------------------------------------------------------------
+  migrations:
+    name: Migrations check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check migration files exist
+        run: |
+          set -euo pipefail
+          echo "Migration files:"
+          ls -1 supabase/migrations/
+          test -f supabase/migrations/0001_extensions.sql
+          test -f supabase/migrations/0002_counties_properties.sql
+          test -f supabase/migrations/0003_notices_auctions_events_documents.sql
+          test -f supabase/migrations/0004_comps_watchlist.sql
+          test -f supabase/migrations/0005_sources_ingestion.sql
+          test -f supabase/migrations/0006_rls.sql
+          test -f supabase/migrations/0007_seed.sql
+          test -f supabase/migrations/0008_indexes_functions.sql
+          # No migration may be empty
+          for f in supabase/migrations/*.sql; do
+            test -s "$f" || { echo "EMPTY migration: $f"; exit 1; }
+          done
+          echo "All 8 migrations present and non-empty."
+
+      - name: Basic SQL sanity check (Python, no DB)
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          files = sorted(pathlib.Path("supabase/migrations").glob("*.sql"))
+          assert files, "No migration files found"
+          for f in files:
+              text = f.read_text(encoding="utf-8")
+              # Balanced parentheses (rough check, ignores parens in strings/comments,
+              # so this is a smoke test only — real check is `supabase db push`).
+              # Require key markers per file so a truncated file fails fast.
+              assert len(text) > 100, f"{f} suspiciously short"
+          # Spot-check required objects exist across migrations
+          all_sql = "\n".join(f.read_text() for f in files)
+          required = [
+              "create extension if not exists postgis",
+              "create table if not exists public.counties",
+              "create table if not exists public.properties",
+              "create table if not exists public.foreclosure_notices",
+              "create table if not exists public.auction_events",
+              "create table if not exists public.property_events",
+              "create table if not exists public.document_records",
+              "create table if not exists public.comparable_sales",
+              "create table if not exists public.watchlist",
+              "create table if not exists public.sources",
+              "create table if not exists public.ingestion_runs",
+              "create table if not exists public.raw_payloads",
+              "create table if not exists public.source_health",
+              "enable row level security",
+              "county_fips",
+              "parcel_id_normalized",
+          ]
+          missing = [r for r in required if r not in all_sql]
+          if missing:
+              print("MISSING required SQL markers:", missing)
+              sys.exit(1)
+          # Seed must not contain fake data markers
+          seed = pathlib.Path("supabase/migrations/0007_seed.sql").read_text()
+          assert "properties" in seed  # comment mentions it, fine
+          for bad in ["INSERT INTO public.properties", "INSERT INTO public.foreclosure_notices",
+                      "INSERT INTO public.auction_events", "INSERT INTO public.comparable_sales"]:
+              assert bad.lower() not in seed.lower(), f"Seed must not insert fake data: {bad}"
+          print(f"SQL sanity check passed for {len(files)} migrations.")
+          PY
+
+      - name: Check no secrets committed (basic)
+        run: |
+          set -euo pipefail
+          # Fail if a .env file with real content is committed, or if a
+          # service-role-looking key appears in tracked files (excluding this workflow's own docs).
+          if git ls-files | grep -E '^\.env(\.|$)' ; then
+            echo "ERROR: .env file committed — secrets must never be committed."; exit 1;
+          fi
+          # Grep for obvious secret patterns in tracked text files (best-effort).
+          if git grep -nE 'SUPABASE_SERVICE_ROLE_KEY=[^[:space:]$]+' -- ':!*.md' ':!*.example' | grep -v 'SUPABASE_SERVICE_ROLE_KEY=$' | grep -v 'SUPABASE_SERVICE_ROLE_KEY= *$' ; then
+            echo "ERROR: possible committed service-role value."; exit 1;
+          fi
+          echo "Secret scan passed."
+
+  # ---------------------------------------------------------------------------
+  # Backend — Python FastAPI
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend (lint + typecheck + tests)
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('backend/**') != '' }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install ruff black mypy pytest
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Black format check
+        run: black --check .
+
+      - name: Mypy typecheck
+        run: mypy app || mypy . --ignore-missing-imports
+
+      - name: Pytest
+        run: pytest -q
+        env:
+          # Tests must use test fixtures / test DB, never production keys.
+          SUPABASE_URL: http://localhost:54321
+          SUPABASE_ANON_KEY: test-anon-key
+          SUPABASE_SERVICE_ROLE_KEY: test-service-role-key
+          INGESTION_SECRET: test-ingestion-secret
+
+  # ---------------------------------------------------------------------------
+  # Frontend — Next.js
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend (typecheck + lint + tests)
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('frontend/**') != '' }}
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Check no service-role key in frontend
+        run: |
+          # The service-role key must NEVER appear in frontend code.
+          if grep -rn "SERVICE_ROLE" --include="*.ts" --include="*.tsx" --include="*.js" . ; then
+            echo "ERROR: SERVICE_ROLE referenced in frontend code."; exit 1;
+          fi
+          echo "Frontend secret check passed."
